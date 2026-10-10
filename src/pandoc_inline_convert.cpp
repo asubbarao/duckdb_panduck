@@ -228,9 +228,110 @@ static void FlattenPandocInlinesVal(yyjson_val *inlines_val, int32_t level, int3
 			}
 			return;
 		} else if (strcmp(pandoc_type, "Cite") == 0) {
+			// THE IMPORT ARM THESE TWO NEVER HAD (#97). Both set `inline_type` and then
+			// fell out of this chain to the tail, which pushes the inline with an EMPTY
+			// content and never recurses -- so a footnote's body was gone before the
+			// writer at :559 ever saw it, and a pandoc -> panduck -> pandoc round trip
+			// could not preserve a footnote even once the export arm existed.
+			//
+			// BEING KNOWN WAS WORSE THAN BEING UNKNOWN: the GENERIC fallback below says
+			// in its own comment to "emit a marker recording what this was, then recurse
+			// into the constructor's children", so an UNRECOGNISED constructor kept its
+			// text while these two, which are recognised, dropped it.
+			//
+			// Cite is the trivial half. `Cite` is [[Citation], [Inline]] -- slot 0 is
+			// citation RECORDS, slot 1 the rendered inlines -- which is exactly `Span`'s
+			// shape, so it gets exactly `Span`'s treatment: lossless and fully
+			// conforming. The records are not round-tripped, matching the export side,
+			// which leaves that list empty deliberately (pandoc_block_convert.cpp:609):
+			// panduck has no citation record to put there and fabricating one would be
+			// worse than an honest gap.
 			inline_type = DuckBlockTypes::INLINE_CITE;
+			yyjson_val *cite_inlines = nullptr;
+			if (c_val && yyjson_is_arr(c_val) && yyjson_arr_size(c_val) >= 2) {
+				cite_inlines = yyjson_arr_get(c_val, 1);
+			}
+			result.push_back(CreateDocInline(inline_type, "", level, attrs, order++));
+			if (cite_inlines) {
+				FlattenPandocInlinesVal(cite_inlines, level + 1, order, result, depth + 1);
+			}
+			return;
 		} else if (strcmp(pandoc_type, "Note") == 0) {
+			// Note is the half that needed a ruling, because pandoc's `Note` holds
+			// BLOCKS while duck_block's inline children are INLINES.
+			//
+			// THE RULING (repo owner, 2026-10-10), confirmed against duck_block_utils'
+			// validator rather than inferred: a block inside an inline is non-conforming
+			// but NOT forbidden, because forbidding it would make some HTML documents
+			// un-representable. `duck_block_is_valid` is per-element and
+			// `duck_blocks_errors` adds only duplicate element_order, level jumps > 1
+			// and a first element_order of 0 -- NO rule relates a child's kind to its
+			// parent's kind, so either shape passes conformance and panduck's
+			// conformance job cannot adjudicate this. The operative consequence:
+			// PREFER A CONFORMING SHAPE WHEREVER ONE IS LOSSLESS, AND NEVER DROP
+			// CONTENT. The allowance exists for representability, not as a default.
+			//
+			// So no kind='block' row is emitted under an inline here. For an
+			// inline-bearing block (Para, Plain) recursing its INLINES is both lossless
+			// and conforming, and that is the common path -- every note the fleet
+			// currently produces is single-paragraph.
 			inline_type = DuckBlockTypes::INLINE_NOTE;
+			size_t note_blocks = (c_val && yyjson_is_arr(c_val)) ? yyjson_arr_size(c_val) : 0;
+			if (note_blocks > 1) {
+				// The ONE thing this shape cannot carry is the paragraph BOUNDARY, so
+				// record it instead of losing it silently. `block_count` is a new key:
+				// nothing DuckBlockVocabulary declares is a count -- ATTR_ID, ATTR_NAME,
+				// ATTR_ROLE and ATTR_KEY are all addressing or provenance -- and
+				// overloading one of those with a new meaning is the drift the vendored
+				// vocabulary exists to prevent. Absent on a single-block note, so its
+				// presence marks a real gap rather than being decoration.
+				attrs["block_count"] = std::to_string(note_blocks);
+			}
+			result.push_back(CreateDocInline(inline_type, "", level, attrs, order++));
+			if (c_val && yyjson_is_arr(c_val)) {
+				size_t b_idx, b_max;
+				yyjson_val *block_item;
+				yyjson_arr_foreach(c_val, b_idx, b_max, block_item) {
+					if (!yyjson_is_obj(block_item)) {
+						continue;
+					}
+					yyjson_val *b_t = yyjson_obj_get(block_item, "t");
+					if (!b_t || !yyjson_is_str(b_t)) {
+						continue;
+					}
+					const char *block_type = yyjson_get_str(b_t);
+					yyjson_val *b_c = yyjson_obj_get(block_item, "c");
+					if (strcmp(block_type, "Para") == 0 || strcmp(block_type, "Plain") == 0) {
+						FlattenPandocInlinesVal(b_c, level + 1, order, result, depth + 1);
+					} else {
+						// Any other block type (CodeBlock, BulletList, Header, ...) has
+						// no inline list to descend, so follow this file's own
+						// philosophy rather than inventing one: emit the GENERIC marker
+						// recording what was there, then recurse exactly as that branch
+						// does. A `c` that is not an inline list simply yields nothing,
+						// so a CodeBlock leaves a visible marker and a BlockQuote's
+						// Para still gives up its words.
+						//
+						// The block's own literal text (a CodeBlock's string, a list
+						// item's structure) is still NOT carried. Doing that properly
+						// needs a level-parameterised yyjson_val* block flattener and
+						// mutual recursion between the two converters -- the block
+						// converter's only public surface is
+						// ConvertPandocAstToBlocks(const string &, vector<Value> &),
+						// which takes JSON and starts from scratch. Separate change;
+						// until then the gap is addressable by a query instead of
+						// invisible.
+						map<string, string> marker_attrs;
+						marker_attrs[DuckBlockTypes::ATTR_SOURCE_TYPE] = string(block_type);
+						result.push_back(
+						    CreateDocInline(DuckBlockTypes::INLINE_GENERIC, "", level + 1, marker_attrs, order++));
+						if (b_c) {
+							FlattenPandocInlinesVal(b_c, level + 2, order, result, depth + 1);
+						}
+					}
+				}
+			}
+			return;
 		} else if (strcmp(pandoc_type, "Span") == 0) {
 			inline_type = DuckBlockTypes::INLINE_SPAN;
 			yyjson_val *inlines = nullptr;
