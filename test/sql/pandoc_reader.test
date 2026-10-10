@@ -452,3 +452,117 @@ SELECT count(*) > 0 FROM (
    WHERE (b).content IS NOT NULL);
 ----
 true
+
+# ---------------------------------------------------------------------------
+# NOTE AND CITE DESCEND INTO THEIR CHILDREN (issue #97).
+#
+# Both constructors set `inline_type` and then fell out of the if/else chain to the
+# tail, which pushes the inline with an EMPTY content and never recurses. So a
+# footnote's body was gone before the writer ever saw it, and a
+# pandoc -> panduck -> pandoc round trip could not preserve a footnote even though
+# the export arm exists (pandoc_inline_convert.cpp:559).
+#
+# BEING KNOWN WAS WORSE THAN BEING UNKNOWN. The GENERIC fallback in the same
+# function says in its own comment: "Preserve the words: emit a marker recording
+# what this was, then recurse into the constructor's children rather than replacing
+# them with a `[Type]` placeholder. Keeps the gap visible AND keeps the text." An
+# UNRECOGNISED constructor kept its text; `Note` and `Cite`, which are recognised,
+# dropped it.
+#
+# THE ISSUE'S EXACT JSON. Before the fix this printed three rows -- the note row
+# with empty content and no child -- and "the body" appeared nowhere.
+query IIIII
+SELECT element_order, kind, level, element_type, coalesce(content, '<NULL>')
+FROM read_pandoc_blocks_string(
+  '{"pandoc-api-version":[1,23,1],"meta":{},"blocks":[{"t":"Para","c":[{"t":"Str","c":"before"},{"t":"Note","c":[{"t":"Para","c":[{"t":"Str","c":"the body"}]}]},{"t":"Str","c":"after"}]}]}')
+ORDER BY element_order;
+----
+0	block	1	paragraph	(empty)
+1	inline	2	text	before
+2	inline	2	note	(empty)
+3	inline	3	text	the body
+4	inline	2	text	after
+
+# CITE IS THE TRIVIAL HALF and is fully conforming: pandoc's `Cite` is
+# [[Citation], [Inline]], exactly `Span`'s shape, so it gets exactly `Span`'s
+# treatment. The citation RECORDS in slot 0 are not round-tripped -- the export side
+# leaves that list empty deliberately (pandoc_block_convert.cpp:609) and this does
+# not change that. The AST below is pandoc's own reading of textile's
+# `??cited work??`.
+query IIII
+SELECT element_order, level, element_type, coalesce(content, '<NULL>')
+FROM read_pandoc_blocks_string(
+  '{"pandoc-api-version":[1,23,1],"meta":{},"blocks":[{"t":"Para","c":[{"t":"Cite","c":[[],[{"t":"Str","c":"cited"},{"t":"Space"},{"t":"Str","c":"work"}]]}]}]}')
+WHERE kind = 'inline' ORDER BY element_order;
+----
+1	2	cite	(empty)
+2	3	text	cited
+3	3	space	 
+4	3	text	work
+
+# A MULTI-PARAGRAPH NOTE: pandoc's `Note` holds BLOCKS, not inlines, so a note with
+# two paragraphs has one thing this shape cannot carry -- the paragraph BOUNDARY.
+# Every word survives, and the boundary is RECORDED rather than silently lost:
+# `block_count` on the note inline says how many blocks the source note held.
+#
+# THE RULING THIS IMPLEMENTS (repo owner, 2026-10-10): a block inside an inline is
+# non-conforming but NOT forbidden, because forbidding it would make some HTML
+# documents un-representable -- so prefer a conforming shape wherever one is
+# lossless, and never drop content. Recursing a Para's INLINES is both, so no
+# kind='block' row is emitted under an inline here.
+query IIIII
+SELECT element_order, level, element_type, coalesce(content, '<NULL>'),
+       coalesce(attributes['block_count'], '<NONE>')
+FROM read_pandoc_blocks_string(
+  '{"pandoc-api-version":[1,23,1],"meta":{},"blocks":[{"t":"Para","c":[{"t":"Note","c":[{"t":"Para","c":[{"t":"Str","c":"first"},{"t":"Space"},{"t":"Str","c":"para"}]},{"t":"Para","c":[{"t":"Str","c":"second"},{"t":"Space"},{"t":"Str","c":"para"}]}]}]}]}')
+WHERE kind = 'inline' ORDER BY element_order;
+----
+1	2	note	(empty)	2
+2	3	text	first	<NONE>
+3	3	space	 	<NONE>
+4	3	text	para	<NONE>
+5	3	text	second	<NONE>
+6	3	space	 	<NONE>
+7	3	text	para	<NONE>
+
+# A SINGLE-PARAGRAPH NOTE CARRIES NO `block_count`, which is the half that proves the
+# attribute marks a real gap rather than being decoration. Every note the fleet
+# currently produces is single-paragraph, so this is the common path and it is the
+# lossless one.
+query II
+SELECT element_type, coalesce(attributes['block_count'], '<NONE>')
+FROM read_pandoc_blocks_string(
+  '{"pandoc-api-version":[1,23,1],"meta":{},"blocks":[{"t":"Para","c":[{"t":"Note","c":[{"t":"Para","c":[{"t":"Str","c":"solo"}]}]}]}]}')
+WHERE element_type = 'note';
+----
+note	<NONE>
+
+# A NOTE HOLDING A NON-PARA BLOCK GETS A VISIBLE MARKER, NOT SILENCE. A `CodeBlock`
+# has no inline children to recurse, so this commit records WHAT WAS THERE in
+# `source_type` exactly as the GENERIC fallback does, instead of emitting nothing.
+# The code TEXT is still not carried -- that needs a level-parameterised block
+# flattener and mutual recursion between the two converters, which is a separate
+# change -- but the gap is now addressable by a query rather than invisible.
+#
+# Before the fix this printed ONE row: the note, empty, with no marker and no hint
+# that a CodeBlock had ever been there.
+query IIIII
+SELECT element_order, level, element_type, coalesce(content, '<NULL>'),
+       coalesce(attributes['source_type'], '<NONE>')
+FROM read_pandoc_blocks_string(
+  '{"pandoc-api-version":[1,23,1],"meta":{},"blocks":[{"t":"Para","c":[{"t":"Note","c":[{"t":"CodeBlock","c":[["",[],[]],"x = 1"]}]}]}]}')
+WHERE kind = 'inline' ORDER BY element_order;
+----
+1	2	note	(empty)	<NONE>
+2	3	generic	(empty)	CodeBlock
+
+# A NOTE WHOSE BLOCK DOES HAVE INLINE CHILDREN KEEPS THEM, through the same marker
+# path -- the recursion is the GENERIC branch's, so a `BlockQuote` wrapping a `Para`
+# yields markers for both and the words underneath them.
+query I
+SELECT string_agg(content, '|' ORDER BY element_order)
+FROM read_pandoc_blocks_string(
+  '{"pandoc-api-version":[1,23,1],"meta":{},"blocks":[{"t":"Para","c":[{"t":"Note","c":[{"t":"BlockQuote","c":[{"t":"Para","c":[{"t":"Str","c":"quoted"}]}]}]}]}]}')
+WHERE element_type = 'text';
+----
+quoted
