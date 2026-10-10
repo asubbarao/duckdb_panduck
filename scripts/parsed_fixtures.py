@@ -97,10 +97,12 @@ class Duck:
     def __init__(self, binary, extension):
         self.binary = binary
         self.extension = extension
+        # ONCE PER PROCESS, not once per query -- see sql().
+        self._fetched = False
 
     def sql(self, body, json_out=True):
-        # A DEDICATED extension_directory, NOT the developer's ~/.duckdb (#62). Two reasons,
-        # and they pull in opposite directions from a bare INSTALL:
+        # A DEDICATED extension_directory, NOT the developer's ~/.duckdb (#62), and a
+        # FORCE INSTALL into it (#100):
         #
         #   1. `INSTALL x FROM community` DOES NOT UPGRADE an already-installed x. On a
         #      machine that installed markdown months ago, a regeneration silently used that
@@ -108,16 +110,50 @@ class Duck:
         #      another. Measured 2026-09-16: ~/.duckdb had markdown 2ba1321 while a clean
         #      directory resolved ee544a8. The manifest is an attribution record, so a label
         #      naming the wrong build is the one defect it exists to prevent.
-        #   2. FORCE INSTALL would fix that by overwriting the developer's own extensions --
-        #      a shared profile every other session on the machine reads. Re-resolving into a
-        #      directory this script owns leaves ~/.duckdb alone and is reproducible.
+        #   2. FORCE INSTALL was once rejected here because it "would overwrite the
+        #      developer's own extensions -- a shared profile every other session on the
+        #      machine reads." THAT OBJECTION IS OBSOLETE, and the dedicated directory is
+        #      what obsoleted it: the SET below runs BEFORE the INSTALLs, so every install
+        #      already lands in the directory this script owns and cannot reach ~/.duckdb.
+        #      The objection describes the world before #62.
+        #
+        #      Which left reason 1 applying to THIS directory, unnoticed, because nothing
+        #      invalidated it: after the first run every bare INSTALL was a no-op and the
+        #      versions reported were whatever was fetched the first time. Measured
+        #      2026-10-10 (#100): the cached artifacts were from 2026-09-29 and held
+        #      markdown 437e204 / webbed 4b70396 / duck_block_utils 39941a7, while the
+        #      registry served 4721b31 / 1716034 / e00db69; two consecutive bare-INSTALL
+        #      runs left every artifact's mtime untouched, i.e. performed no fetch at all.
+        #      Paired arms, one seeded directory, the verb the only variable: INSTALL
+        #      resolved 437e204 / 4b70396 / 39941a7 and fetched nothing, FORCE INSTALL
+        #      resolved 4721b31 / 1716034 / e00db69; an EMPTY directory resolved the latter
+        #      under either verb, which is the control saying the stale labels came from
+        #      the directory and not from the registry.
+        #      Severity was narrower than it looks -- the CI job uses a fresh checkout with
+        #      no actions/cache, so this directory never exists there -- but `--regen` reads
+        #      the same cache, and a manifest is an attribution record.
+        #
+        # CONSEQUENCE, ACCEPTED: this check now needs the network on EVERY run and is slower
+        # for it. That is the price of the question it asks. A drift check that can answer
+        # from a cache is answering a different question -- "what did we download once?" --
+        # and there is deliberately no offline opt-out, because an opt-out would have to
+        # print that its verdict came from a cache, and a drift verdict with that asterisk
+        # on it is exactly what #100 was.
+        #
+        # FORCED ONCE PER PROCESS, THEN BARE. Every sql() is its own duckdb subprocess, so
+        # forcing in each one re-downloaded all four extensions ~11 times per run: measured
+        # 0.56s -> 40.3s. The run needs ONE fetch; after it the artifacts in this directory
+        # are this run's, and reason 1's no-op is then exactly what is wanted. The flag
+        # flips only after the subprocess succeeded, so a failed first fetch is retried
+        # rather than silently downgraded to a bare INSTALL.
         #
         # duck_block_utils is installed here too, which it never was: the spec probe did a
         # bare LOAD, so in any clean environment -- including every CI runner -- it failed and
         # wrote `unavailable` into every manifest row (#62).
+        install = "FORCE INSTALL" if not self._fetched else "INSTALL"
         prelude = f"SET extension_directory = '{EXTENSION_DIR}';\n" \
-                  "INSTALL markdown FROM community; INSTALL webbed FROM community; " \
-                  "INSTALL pdf FROM community; INSTALL duck_block_utils FROM community; " \
+                  f"{install} markdown FROM community; {install} webbed FROM community; " \
+                  f"{install} pdf FROM community; {install} duck_block_utils FROM community; " \
                   "LOAD markdown; LOAD webbed; LOAD pdf;\n"
         if self.extension:
             prelude = f"LOAD '{self.extension}';\n" + prelude
@@ -128,6 +164,7 @@ class Duck:
         r = subprocess.run(args, capture_output=True, text=True)
         if r.returncode != 0:
             raise RuntimeError(f"duckdb failed:\n{r.stderr.strip()}\n--- sql ---\n{body}")
+        self._fetched = True
         if not json_out:
             return r.stdout
         out = r.stdout.strip()
