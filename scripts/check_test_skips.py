@@ -74,6 +74,21 @@ STATICALLY_LINKED = (
     "parquet",  # test/sql/ has one `require parquet`; parquet ships in DuckDB's default build.
 )
 
+# `require <word>` DOES NOT ALWAYS NAME AN EXTENSION. sqllogictest takes runner
+# directives through the same keyword -- `require notwindows`, `require notmingw`,
+# `require noforcestorage`, `require skip_reload` (see duckdb/test/sqlite/
+# sqllogic_test_runner.cpp) -- and those gate on PLATFORM OR MODE, not on extension
+# availability. Predicting them as missing extensions was wrong twice over: the reason
+# text said "not loaded by this build", naming a cause that does not apply, and on a Linux
+# runner `require notwindows` does not skip at all -- so the only way to satisfy the guard
+# was to DECLARE a skip that never happens. A false declaration is worse than none,
+# because it would also absorb a real future skip of that same file.
+#
+# Whether these skip is a property of the runner, not of the file's text, so the static
+# mode does not predict them. The runtime mode still reports them, because it reads what
+# actually happened.
+RUNNER_DIRECTIVES = ("notwindows", "notmingw", "noforcestorage", "skip_reload")
+
 BARE_INSTALL_RE = re.compile(r"^INSTALL\s+(\w+)\s*;", re.M)
 REQUIRE_ENV_RE = re.compile(r"^require-env\s+(\S+)", re.M)
 # `require <ext>` on its own line. Must NOT match `require-env FOO`: after `require` comes
@@ -164,7 +179,11 @@ def predict(path=None, text=None):
     # `require <ext>` GATES THE FILE BEFORE ANY INSTALL LINE EXECUTES, same reasoning as
     # require-env above: an unavailable `require` means a bare INSTALL below it never runs
     # either, so these two causes are also mutually exclusive within one file.
-    unavailable = [ext for ext in REQUIRE_RE.findall(text) if ext not in available_extensions()]
+    unavailable = [
+        ext
+        for ext in REQUIRE_RE.findall(text)
+        if ext not in available_extensions() and ext not in RUNNER_DIRECTIVES
+    ]
     if unavailable:
         return [
             (f"require {ext}", f"require {ext} -- not loaded by this build, so it gates the whole file")
@@ -177,6 +196,23 @@ def predict(path=None, text=None):
     return reasons
 
 
+# (file text, must a skip be predicted?, what the arm proves). A module constant rather
+# than a local so the summary line can COUNT it instead of asserting a literal: the
+# summary used to say "5 self-test arm(s) passed" in prose, which went stale the moment an
+# arm was added -- a number describing the code as written rather than as it runs.
+SELF_TEST_CASES = (
+    ("require httpfs\n", True, "require httpfs (not loaded by this build) must predict a skip"),
+    ("require panduck\n", False, "require panduck (this repo's own extension, built) must not"),
+    ("require parquet\n", False, "require parquet (statically linked) must not"),
+    ("require-env FOO\n", True, "require-env alone must still predict a skip (no regression)"),
+    # The runner-directive arms. Without the RUNNER_DIRECTIVES exclusion these predict a
+    # skip and demand a DECLARED entry for a file that runs on every Linux runner, which
+    # is how the omission was found.
+    ("require notwindows\n", False, "require notwindows gates on platform, not extensions"),
+    ("require skip_reload\n", False, "require skip_reload gates on runner mode, not extensions"),
+)
+
+
 def self_test():
     """Prove the predictor fires on synthetic input -- including the negative arms.
 
@@ -186,12 +222,7 @@ def self_test():
     all. Writes synthetic .test files to a temp directory so test/sql/ is never touched.
     """
     failures = []
-    cases = [
-        ("require httpfs\n", True, "require httpfs (not loaded by this build) must predict a skip"),
-        ("require panduck\n", False, "require panduck (this repo's own extension, built) must not"),
-        ("require parquet\n", False, "require parquet (statically linked) must not"),
-        ("require-env FOO\n", True, "require-env alone must still predict a skip (no regression)"),
-    ]
+    cases = SELF_TEST_CASES
     with tempfile.TemporaryDirectory() as tmp_name:
         tmp = pathlib.Path(tmp_name)
         for text, want_skip, label in cases:
@@ -253,9 +284,13 @@ def main():
             print("\nFAILED: the predictor did not behave as expected on synthetic input. Its")
             print("        verdict on real test files cannot be trusted until this is fixed.")
             return 1
-        print("OK: 5 self-test arm(s) passed -- require httpfs predicted, require panduck and")
-        print("    require parquet not predicted, require-env alone predicted, and require-env")
-        print("    + require httpfs together yield only the require-env reason.")
+        # len(SELF_TEST_CASES) + 1 for the require-env-and-require-httpfs-together arm,
+        # which self_test() runs inline rather than from the table because it asserts the
+        # SHAPE of the result (one reason, the env one) and not merely that one exists.
+        print(f"OK: {len(SELF_TEST_CASES) + 1} self-test arm(s) passed:")
+        for label in (lbl for _, _, lbl in SELF_TEST_CASES):
+            print(f"    - {label}")
+        print("    - require-env + require httpfs together yield only the require-env reason")
         return 0
 
     if args.static:
