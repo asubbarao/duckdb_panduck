@@ -184,6 +184,15 @@ void RequireReaderEnabled(ClientContext &context, const char *format);
 //! permission, a remote that answers then dies -- lets DuckDB's own OpenFile error
 //! propagate, naming the actual cause. ifstream collapsed both cases into one
 //! "cannot open", which named neither.
+//!
+//! AND IT OPENS BEFORE IT JUDGES. The first version asked FileExists() up front,
+//! which reads as "does this path exist" and is not: it is false for a FIFO, a
+//! character device and /dev/stdin, all of which OpenFile reads. So a piped
+//! document was reported "file not found" -- the very case the paragraph above
+//! reserves that message for. The open now runs first and absence is only
+//! consulted after it fails. Anything that reads to EOF rather than to a known
+//! length belongs here too: a stream reports size 0, so a sized read returns an
+//! empty document instead of the stream's contents.
 std::string ReadFileThroughVFS(ClientContext &context, const std::string &path, const char *function_name);
 
 //! Open a file through DuckDB's FileSystem and hand back the handle, for a reader

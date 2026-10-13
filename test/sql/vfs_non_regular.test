@@ -1,0 +1,66 @@
+# name: test/sql/vfs_non_regular.test
+# description: a reader opens a path that is not a regular file -- a pipe or a device (#120 follow-up)
+# group: [sql]
+
+require panduck
+
+# /dev/null and /dev/stdin are POSIX. Nothing here applies on Windows, where the whole
+# question does not arise.
+require notwindows
+
+#
+# WHAT BROKE, AND WHY IT WAS INVISIBLE
+#
+# OpenFileThroughVFS (#120 step 2b) gated every reader behind `FileExists(path)`.
+# FileExists() reads as "does this path exist" and does not mean that: it answers "is
+# there an existing REGULAR file here", and it is FALSE for a FIFO, a character device
+# and /dev/stdin -- all of which OpenFile reads without complaint, as DuckDB's own
+# read_text('/dev/stdin') demonstrates.
+#
+# So a caller piping a document in got `file not found`, which is the ONE case the
+# contract on OpenFileThroughVFS reserves that message for. The check contradicted the
+# contract it was written to implement.
+#
+# It was invisible here because every fixture in this suite is a regular file on disk,
+# and invisible to the one consumer that pipes -- duckeye routes every pandoc-mediated
+# format through `read_pandoc_blocks('/dev/stdin')` -- because that project's CI had not
+# been read for six days. 17 of its assertions were failing: rst, man, and every pandoc
+# format at once.
+#
+# A character device is the hermetic way to pin this. It needs no FIFO, no second
+# process and no fixture, it exists on every POSIX runner, and FileExists() is false for
+# it for exactly the same reason it is false for a pipe.
+#
+
+# Before the fix this was `file not found`. It is now an open that succeeds and reads
+# nothing, which is what an empty document is: zero blocks, not an error.
+query I
+SELECT count(*) FROM read_pandoc_blocks('/dev/null');
+----
+0
+
+# The same for the whole-file readers, which take the other branch of the helper
+# (ReadFileThroughVFS, where a stream reporting size 0 also had to stop meaning "empty").
+query I
+SELECT count(*) FROM read_rtf_blocks('/dev/null');
+----
+0
+
+# ---------------------------------------------------------------------------
+# AND THE TWO DOCUMENTED CASES STAY DISTINCT. These are the properties the gate was
+# there to provide, so the fix is only correct if it keeps both of them -- a path that
+# is absent still names itself missing, and a path that is present but unopenable still
+# reports DuckDB's own reason rather than being collapsed into either one.
+# ---------------------------------------------------------------------------
+
+statement error
+SELECT count(*) FROM read_pandoc_blocks('/nope/does_not_exist.json');
+----
+file not found: /nope/does_not_exist.json
+
+# A directory exists, so it must NOT be reported as missing. DuckDB's own open error
+# stands, which is the precision the helper's header claims.
+statement error
+SELECT count(*) FROM read_pandoc_blocks('/tmp');
+----
+<REGEX>:.*(Cannot open|directory|Is a directory|IO Error).*
