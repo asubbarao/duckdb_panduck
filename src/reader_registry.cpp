@@ -2931,13 +2931,30 @@ unique_ptr<FileHandle> OpenFileThroughVFS(ClientContext &context, const std::str
 	// client's registered filesystems -- httpfs, s3, an encrypted or in-memory one
 	// -- are reachable only through the context's FileSystem.
 	auto &fs = FileSystem::GetFileSystem(context);
-	if (!fs.FileExists(path)) {
-		throw IOException("%s: file not found: %s", function_name, path);
+	// OPEN FIRST, and let the open decide. FileExists() does not answer "does this
+	// path exist" -- it answers "is there an existing REGULAR file here", and it is
+	// false for a FIFO, a character device and /dev/stdin, every one of which
+	// OpenFile reads happily (DuckDB's own read_text('/dev/stdin') works). Gating on
+	// it told a caller piping a document through /dev/stdin that its file was "not
+	// found", which is the ONE case the header says that message is reserved for --
+	// so the check contradicted the contract it was written to implement. duckeye
+	// pipes every pandoc-mediated format that way, so rst, man, docx, odt, epub,
+	// org, tex, rtf, textile, mediawiki and ipynb all failed at once.
+	try {
+		return fs.OpenFile(path, FileOpenFlags::FILE_FLAGS_READ);
+	} catch (const std::exception &) {
+		// Ask about absence only once the open has already failed, so the two
+		// documented cases keep their distinct messages: a path that is not there
+		// gets "file not found"; a path that is there but will not open -- no read
+		// permission, a remote that answers then dies -- rethrows DuckDB's own
+		// error, naming the actual cause. That is the precision note in the header,
+		// preserved; what changes is that "not a regular file" is no longer
+		// mistaken for "not there".
+		if (!fs.FileExists(path)) {
+			throw IOException("%s: file not found: %s", function_name, path);
+		}
+		throw;
 	}
-	// OpenFile's OWN error is allowed to propagate, which is the precision note in
-	// the header: a path that exists but will not open names its actual cause
-	// instead of being collapsed into "cannot open".
-	return fs.OpenFile(path, FileOpenFlags::FILE_FLAGS_READ);
 }
 
 std::string ReadFileThroughVFS(ClientContext &context, const std::string &path, const char *function_name) {
@@ -2948,11 +2965,19 @@ std::string ReadFileThroughVFS(ClientContext &context, const std::string &path, 
 	// handle would widen the helper's shape for nothing.
 	auto handle = OpenFileThroughVFS(context, path, function_name);
 	auto &fs = FileSystem::GetFileSystem(context);
-	auto size = fs.GetFileSize(*handle);
+	// READ TO EOF rather than trusting GetFileSize. This was the second half of the
+	// same bug: a pipe reports size 0, so the sized single Read returned an EMPTY
+	// document for /dev/stdin even once the open above stopped refusing it -- which
+	// would have looked like a parse failure rather than an unread stream. A regular
+	// file costs one extra zero-length Read at the end and is otherwise unchanged.
 	std::string data;
-	data.resize(size);
-	if (size > 0) {
-		fs.Read(*handle, const_cast<char *>(data.data()), size);
+	char buffer[1 << 16];
+	while (true) {
+		auto read = fs.Read(*handle, buffer, static_cast<int64_t>(sizeof(buffer)));
+		if (read <= 0) {
+			break;
+		}
+		data.append(buffer, static_cast<size_t>(read));
 	}
 	return data;
 }
