@@ -595,6 +595,17 @@ SELECT COALESCE(panduck_format_for('git://a.md?ref=HEAD'), 'NULL') AS ref_query,
 ----
 markdown	markdown	true
 
+# A GIT URI'S QUERY STARTS AT `?ref=`, NOT AT `?` OR `#` (duck_tails docs/git_uris.md,
+# "Query component rules"). `#` is part of a file name, and a `?` not followed by `ref=`
+# is a glob wildcard in the path. Measured on 4f05281, which cut at the first `?` or `#`:
+# all three NULL.
+query III
+SELECT COALESCE(panduck_format_for('git://notes#1.md?ref=HEAD'), 'NULL')   AS hash_in_name,
+       COALESCE(panduck_format_for('git://data/file?.md?ref=HEAD'), 'NULL') AS glob_question_mark,
+       COALESCE(panduck_format_for('git://docs/C#-guide.md'), 'NULL')       AS hash_no_ref;
+----
+markdown	markdown	markdown
+
 # The deprecated `@rev` form stays valid until duck_tails stops accepting it, so it must
 # keep its reader through stage 1. And a `?` is legal in a local filename: the cut is
 # scoped to git://, as the `@` rule is.
