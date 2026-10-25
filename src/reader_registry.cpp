@@ -48,6 +48,11 @@ std::string NormalizeExt(const std::string &raw) {
 //! panduck_can_read() answers for a file that does not exist.
 //! Drop a trailing `@<revision>` from a git URI's basename.
 //!
+//! A COPY OF duck_tails' GRAMMAR, and a wrong one: it cuts at the last `@`, so
+//! `a.md@HEAD@{0}` keeps `@HEAD` (#147). It survives only for a path the VFS did
+//! not canonicalize -- see ExtOfPath(ClientContext &, ...) -- and goes once a
+//! duck_tails with the CanonicalizePath override has shipped (#148, stage 2).
+//!
 //! Only when the `@` falls after the last dot, so the revision goes and a filename
 //! that merely contains an `@` keeps its extension: `Doc.md@12345` -> `Doc.md`,
 //! while `Doc@v1.md` is returned untouched.
@@ -76,14 +81,24 @@ static std::string StripUrlQuery(const std::string &base) {
 struct SchemeCleaner {
 	const char *scheme;
 	std::string (*clean)(const std::string &);
+	//! Clean the whole path BEFORE the basename is taken, not the basename. A git
+	//! ref may carry `/` (`?ref=feature/foo`), so a basename taken first would be
+	//! the tail of the ref. http(s) keeps its basename-only behaviour.
+	bool whole_path;
 };
 static const SchemeCleaner SCHEME_CLEANERS[] = {
-    {"git://", StripGitRevision},
-    {"http://", StripUrlQuery},
-    {"https://", StripUrlQuery},
+    {"git://", StripUrlQuery, true},
+    {"http://", StripUrlQuery, false},
+    {"https://", StripUrlQuery, false},
 };
 
-std::string ExtOfPath(const std::string &path) {
+static bool IsGitUri(const std::string &path) {
+	return path.rfind("git://", 0) == 0;
+}
+
+//! `as_written` is false only for a git URI the VFS canonicalized, whose
+//! revision is already in the query and so needs no git grammar.
+static std::string ExtOf(std::string path, bool as_written) {
 	// A URL SCHEME IS AN EXTENSION FOR REGISTRY PURPOSES.
 	// `zim://wiki.zim/A/Article` names ONE ARTICLE inside an archive, and its
 	// trailing segment usually has no dot at all -- so extension lookup answers
@@ -96,6 +111,16 @@ std::string ExtOfPath(const std::string &path) {
 	// cannot be a single row.
 	if (path.rfind("zim://", 0) == 0) {
 		return "zim://";
+	}
+	const SchemeCleaner *scheme_cleaner = nullptr;
+	for (auto &cleaner : SCHEME_CLEANERS) {
+		if (path.rfind(cleaner.scheme, 0) == 0) {
+			scheme_cleaner = &cleaner;
+			break;
+		}
+	}
+	if (scheme_cleaner && scheme_cleaner->whole_path) {
+		path = scheme_cleaner->clean(path);
 	}
 	auto slash = path.find_last_of("/\\");
 	auto base = slash == std::string::npos ? path : path.substr(slash + 1);
@@ -124,11 +149,11 @@ std::string ExtOfPath(const std::string &path) {
 	// filename, so stripping it everywhere would turn `my@file.md` into `my` and
 	// lose the extension. Scope it to git:// and require the `@` to fall AFTER the
 	// last dot, so a revision is removed and `git://Doc@v1.md` is not.
-	for (auto &cleaner : SCHEME_CLEANERS) {
-		if (path.rfind(cleaner.scheme, 0) == 0) {
-			base = cleaner.clean(base);
-			break;
-		}
+	if (scheme_cleaner && !scheme_cleaner->whole_path) {
+		base = scheme_cleaner->clean(base);
+	}
+	if (as_written && IsGitUri(path)) {
+		base = StripGitRevision(base);
 	}
 
 	auto dot = base.find_last_of('.');
@@ -136,6 +161,36 @@ std::string ExtOfPath(const std::string &path) {
 		return "";
 	}
 	return NormalizeExt(base.substr(dot));
+}
+
+std::string ExtOfPath(const std::string &path) {
+	return ExtOf(path, true);
+}
+
+//! A GIT URI'S REVISION IS duck_tails' GRAMMAR, NOT OURS, so it is read through
+//! the VFS: duck_tails' CanonicalizePath moves `@rev` into `?ref=` (duck_tails#68),
+//! and the query cut then leaves the path. Only git:// pays for the call. Any other
+//! path keeps the pure string answer and its no-I/O promise.
+//!
+//! THE RESULT IS KEPT ONLY IF IT IS STILL A git:// URI. Without duck_tails, git://
+//! is not a registered prefix, so the local filesystem answers with about
+//! `/<cwd>/git:/a.md@HEAD`; a duck_tails without the override inherits the base
+//! FileSystem rule and answers `git:/a.md@HEAD`. Neither throws, and neither moved
+//! the revision, so both fall back to the path as written. The catch is for a
+//! registered prefix whose filesystem refuses the path.
+//!
+//! The answer only chooses the reader. The reader opens the path as written.
+std::string ExtOfPath(ClientContext &context, const std::string &path) {
+	if (IsGitUri(path)) {
+		try {
+			auto canonical = FileSystem::GetFileSystem(context).CanonicalizePath(path);
+			if (IsGitUri(canonical)) {
+				return ExtOf(canonical, false);
+			}
+		} catch (std::exception &) {
+		}
+	}
+	return ExtOfPath(path);
 }
 
 //! A reader parameter name must be a bare identifier.
@@ -520,7 +575,7 @@ void BuiltinFormatFun(DataChunk &args, ExpressionState &state, Vector &result) {
 			result.SetValue(i, Value());
 			continue;
 		}
-		auto fmt = ReaderRegistry::Get().BuiltinFormat(ExtOfPath(paths[idx].GetString()));
+		auto fmt = ReaderRegistry::Get().BuiltinFormat(ExtOfPath(state.GetContext(), paths[idx].GetString()));
 		result.SetValue(i, fmt.empty() ? Value() : Value(fmt));
 	}
 }
@@ -546,7 +601,7 @@ void RegistryFieldFun(DataChunk &args, ExpressionState &state, Vector &result) {
 		auto idx = input.sel->get_index(i);
 		ReaderEntry entry;
 		if (!input.validity.RowIsValid(idx) ||
-		    !ReaderRegistry::Get().Lookup(ExtOfPath(paths[idx].GetString()), entry)) {
+		    !ReaderRegistry::Get().Lookup(ExtOfPath(state.GetContext(), paths[idx].GetString()), entry)) {
 			result.SetValue(i, Value());
 			continue;
 		}
@@ -574,7 +629,7 @@ void RegistryFieldFun(DataChunk &args, ExpressionState &state, Vector &result) {
 void CanReadFun(DataChunk &args, ExpressionState &state, Vector &result) {
 	UnaryExecutor::Execute<string_t, bool>(args.data[0], result, args.size(), [&](string_t path) {
 		ReaderEntry entry;
-		return ReaderRegistry::Get().Lookup(ExtOfPath(path.GetString()), entry);
+		return ReaderRegistry::Get().Lookup(ExtOfPath(state.GetContext(), path.GetString()), entry);
 	});
 }
 
@@ -643,7 +698,7 @@ void ReaderOptionForFun(DataChunk &args, ExpressionState &state, Vector &result)
 		auto value = values[v_idx].GetString();
 
 		ReaderEntry entry;
-		ReaderRegistry::Get().Lookup(ExtOfPath(path), entry);
+		ReaderRegistry::Get().Lookup(ExtOfPath(state.GetContext(), path), entry);
 		const readers::ReaderOption *match = nullptr;
 		for (auto &o : entry.options) {
 			if (o.intent == intent && o.value == value) {
