@@ -182,19 +182,24 @@ std::string ExtOfPath(const std::string &path) {
 //! and the `?ref=` cut then leaves the path. Only git:// pays for the call. Any other
 //! path keeps the pure string answer and its no-I/O promise.
 //!
-//! THE RESULT IS KEPT ONLY IF IT IS STILL A git:// URI. Without duck_tails, git://
-//! is not a registered prefix, so the local filesystem answers with about
-//! `/<cwd>/git:/a.md@HEAD`; a duck_tails without the override inherits the base
-//! FileSystem rule and answers `git:/a.md@HEAD`. Neither throws, and neither moved
-//! the revision, so both fall back to the path as written. The catch is for a
-//! registered prefix whose filesystem refuses the path.
+//! THE RESULT IS KEPT ONLY IF IT MOVED A REVISION INTO `?ref=`, which is the one
+//! thing the override does. Without the override, what comes back depends on the
+//! DuckDB line, and none of it is canonical. On v1.5.6 the local filesystem
+//! answers about `/<cwd>/git:/a.md@HEAD`, and the base FileSystem rule answers
+//! `git:/a.md@HEAD`. On v2.0 (d54cbbe) it answers `git://a.md@HEAD/`, measured: a
+//! git:// URI with a trailing `/`, so its basename is empty. A scheme check passed
+//! that and lost the `@rev` fallback; reader_registry.test failed on v2.0 for it.
+//! Anything else is read as written, which also covers an override that had
+//! nothing to move. The catch is for a registered prefix whose filesystem refuses
+//! the path.
 //!
 //! The answer only chooses the reader. The reader opens the path as written.
 std::string ExtOfPath(ClientContext &context, const std::string &path) {
 	if (IsGitUri(path)) {
 		try {
 			auto canonical = FileSystem::GetFileSystem(context).CanonicalizePath(path);
-			if (IsGitUri(canonical)) {
+			if (path.find("?ref=") == std::string::npos && IsGitUri(canonical) &&
+			    canonical.find("?ref=") != std::string::npos) {
 				return ExtOf(canonical, false);
 			}
 		} catch (std::exception &) {
