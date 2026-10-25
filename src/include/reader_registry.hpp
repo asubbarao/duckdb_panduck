@@ -105,6 +105,10 @@ struct ReaderEntry {
 //! The extension of a path, lowercased and dot-prefixed ("" when there is
 //! none).
 std::string ExtOfPath(const std::string &path);
+//! The same, but a git:// URI goes through the VFS's CanonicalizePath first, so
+//! duck_tails decides where its revision ends. Use this one wherever a context
+//! exists; see reader_registry.cpp.
+std::string ExtOfPath(ClientContext &context, const std::string &path);
 
 //! A bare identifier: `^[A-Za-z_][A-Za-z0-9_]*$`. See ReaderOption.
 bool IsIdentifier(const std::string &s);
