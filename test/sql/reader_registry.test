@@ -577,6 +577,33 @@ SELECT panduck_format_for('s3://b/doc.odt') AS untouched_scheme,
 ----
 odt	NULL
 
+# THE CANONICAL GIT URI PUTS THE REVISION IN THE QUERY (duck_tails#68): `git_uri` columns
+# and glob results come back as `git://<path>?ref=<rev>`, so the reader for one of those
+# must be found from the path, not from the ref. #148, stage 1. Measured on main 402a58f:
+#
+#     git://a.md?ref=HEAD                                NULL    the query
+#     git://repo/docs/guide.md?ref=feature/new-feature   NULL    the query, and its `/`
+#
+# The second is the one that discriminates. A ref may carry `/`, so a cut at `?` made
+# AFTER taking the basename sees `new-feature` and still finds no extension -- the query
+# has to go before the path is split. These run without duck_tails loaded, as all of
+# panduck's tests do, so they exercise the as-written fallback, not the canonical path.
+query III
+SELECT COALESCE(panduck_format_for('git://a.md?ref=HEAD'), 'NULL') AS ref_query,
+       COALESCE(panduck_format_for('git://repo/docs/guide.md?ref=feature/new-feature'), 'NULL') AS slash_ref,
+       panduck_can_read('git://repo/docs/guide.md?ref=feature/new-feature') AS can_read;
+----
+markdown	markdown	true
+
+# The deprecated `@rev` form stays valid until duck_tails stops accepting it, so it must
+# keep its reader through stage 1. And a `?` is legal in a local filename: the cut is
+# scoped to git://, as the `@` rule is.
+query II
+SELECT panduck_format_for('git://a.md@HEAD') AS at_rev,
+       panduck_format_for('notes?v1.md')     AS local_question_mark;
+----
+markdown	markdown
+
 # THE ARCHIVE ENDS AT `.zim`, WHICH IS WHAT SPLITS THE TWO HALVES. Splitting on the first
 # slash would take `wiki.zim` out of `zim://books/wiki.zim/A/Page` and leave `books` --
 # so the nested case is the one that discriminates, and a flat archive path alone would
