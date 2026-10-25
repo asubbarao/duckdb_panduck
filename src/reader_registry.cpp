@@ -75,6 +75,16 @@ static std::string StripUrlQuery(const std::string &base) {
 	return cut == std::string::npos ? base : base.substr(0, cut);
 }
 
+//! Drop a git URI's `?ref=<rev>` query, which is the canonical place for its
+//! revision (duck_tails#68). It is NOT StripUrlQuery: in a git URI the query
+//! starts at the first `?ref=`, `#` is part of a file name, and a bare `?` is a
+//! glob wildcard in the path (duck_tails docs/git_uris.md, "Query component
+//! rules"). Nothing follows the ref, so the cut is safe on the whole path.
+static std::string StripGitRefQuery(const std::string &path) {
+	auto cut = path.find("?ref=");
+	return cut == std::string::npos ? path : path.substr(0, cut);
+}
+
 //! Schemes whose URIs carry decoration AFTER the extension, with the rule that
 //! removes it. A scheme absent here needs no cleaning -- see the measurement in
 //! ExtOfPath.
@@ -87,7 +97,7 @@ struct SchemeCleaner {
 	bool whole_path;
 };
 static const SchemeCleaner SCHEME_CLEANERS[] = {
-    {"git://", StripUrlQuery, true},
+    {"git://", StripGitRefQuery, true},
     {"http://", StripUrlQuery, false},
     {"https://", StripUrlQuery, false},
 };
@@ -169,7 +179,7 @@ std::string ExtOfPath(const std::string &path) {
 
 //! A GIT URI'S REVISION IS duck_tails' GRAMMAR, NOT OURS, so it is read through
 //! the VFS: duck_tails' CanonicalizePath moves `@rev` into `?ref=` (duck_tails#68),
-//! and the query cut then leaves the path. Only git:// pays for the call. Any other
+//! and the `?ref=` cut then leaves the path. Only git:// pays for the call. Any other
 //! path keeps the pure string answer and its no-I/O promise.
 //!
 //! THE RESULT IS KEPT ONLY IF IT IS STILL A git:// URI. Without duck_tails, git://
