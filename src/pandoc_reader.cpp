@@ -154,8 +154,13 @@ void RegisterPandocReader(ExtensionLoader &loader) {
 	}
 
 	{
-		CreateScalarFunctionInfo info(ScalarFunction("panduck_pandoc_ast_to_blocks", {LogicalType::VARCHAR},
-		                                             DuckBlockTypes::DuckBlockListType(), PandocAstToBlocksFun));
+		// FALLIBLE: it raises InvalidInputException from the reader policy gate
+		// and from the AST depth guard. DuckDB v2.0.0 turns an execution error from
+		// a function not marked SetFallible() into an INTERNAL error.
+		auto to_blocks = ScalarFunction("panduck_pandoc_ast_to_blocks", {LogicalType::VARCHAR},
+		                                DuckBlockTypes::DuckBlockListType(), PandocAstToBlocksFun);
+		to_blocks.SetFallible();
+		CreateScalarFunctionInfo info(std::move(to_blocks));
 		info.on_conflict = OnCreateConflict::ALTER_ON_CONFLICT;
 		FunctionDescription desc;
 		desc.parameter_names = {"pandoc_ast_json"};
