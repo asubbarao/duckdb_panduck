@@ -1041,7 +1041,10 @@ unique_ptr<FunctionData> RegisterBind(ClientContext &context, TableFunctionBindI
 			for (idx_t i = 0; i < fields.size(); i++) {
 				auto &name = field_types[i].first;
 				if (fields[i].IsNull()) {
-					throw InvalidInputException("panduck: an option needs a non-NULL '%s'", name);
+					// The cast is for v2.0, where the name is an Identifier and the
+					// formatter SQL-quotes it: '"arg"', measured. Identity on v1.5.6.
+					throw InvalidInputException("panduck: an option needs a non-NULL '%s'",
+					                            static_cast<const string &>(name));
 				}
 				auto text = fields[i].GetValue<string>();
 				if (name == "intent") {
