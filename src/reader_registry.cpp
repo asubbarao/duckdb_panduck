@@ -1041,7 +1041,10 @@ unique_ptr<FunctionData> RegisterBind(ClientContext &context, TableFunctionBindI
 			for (idx_t i = 0; i < fields.size(); i++) {
 				auto &name = field_types[i].first;
 				if (fields[i].IsNull()) {
-					throw InvalidInputException("panduck: an option needs a non-NULL '%s'", name);
+					// The cast is for v2.0, where the name is an Identifier and the
+					// formatter SQL-quotes it: '"arg"', measured. Identity on v1.5.6.
+					throw InvalidInputException("panduck: an option needs a non-NULL '%s'",
+					                            static_cast<const string &>(name));
 				}
 				auto text = fields[i].GetValue<string>();
 				if (name == "intent") {
@@ -3308,15 +3311,22 @@ void RegisterReaderRegistry(ExtensionLoader &loader) {
 	// every release PR against v2.0 with no per-extension opt-out, so it would
 	// have been red there too.
 	panduck::SetNullHandling(option_for, FunctionNullHandling::SPECIAL_HANDLING);
+	// FALLIBLE, like render_params below: both raise InvalidInputException on a
+	// request they refuse. DuckDB v2.0.0 turns an execution error from a function
+	// not marked SetFallible() into an INTERNAL error -- which failed the
+	// community-extensions v2.0.0 build of 0.6.3 at multidoc.test:568. See the
+	// note above the pandoc writers in pandoc_block_convert.cpp.
+	option_for.SetFallible();
 	RegisterScalarWithDesc(loader, option_for, {"format", "option_name", "intent"},
 	                       "Look up a reader configuration option for a given format.",
 	                       {"panduck_reader_option_for('docx', 'toc', NULL)"});
 
-	RegisterScalarWithDesc(loader,
-	                       ScalarFunction("panduck_render_params",
-	                                      {LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR)},
-	                                      LogicalType::VARCHAR, RenderParamsFun),
-	                       {"params_map"}, "Render named parameters map into SQL argument string.",
+	ScalarFunction render_params("panduck_render_params",
+	                             {LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR)}, LogicalType::VARCHAR,
+	                             RenderParamsFun);
+	render_params.SetFallible();
+	RegisterScalarWithDesc(loader, render_params, {"params_map"},
+	                       "Render named parameters map into SQL argument string.",
 	                       {"panduck_render_params(MAP {'opt': 'val'})"});
 
 	TableFunction registry("panduck_reader_registry", {}, RegistryScan, RegistryBind, RegistryGlobalState::Init);

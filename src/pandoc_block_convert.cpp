@@ -3474,10 +3474,15 @@ void PandocBlockConvert::Register(ExtensionLoader &loader) {
 	}
 
 	// Primary name, and the deprecated v0.4.1 spelling kept working alongside it.
+	//
+	// BOTH FALLIBLE, and the note above said "all three" without them: PandocAstJsonFun
+	// calls BuildBlocksJson too, so it reaches the same depth guard. Found when the
+	// community-extensions v2.0.0 build of 0.6.3 failed on an unmarked sibling.
 	{
-		CreateScalarFunctionInfo info(ScalarFunction("panduck_blocks_to_pandoc_json",
-		                                             {DuckBlockTypes::DuckBlockListType()}, LogicalType::VARCHAR,
-		                                             PandocAstJsonFun));
+		auto to_json = ScalarFunction("panduck_blocks_to_pandoc_json", {DuckBlockTypes::DuckBlockListType()},
+		                              LogicalType::VARCHAR, PandocAstJsonFun);
+		to_json.SetFallible();
+		CreateScalarFunctionInfo info(std::move(to_json));
 		info.on_conflict = OnCreateConflict::ALTER_ON_CONFLICT;
 		FunctionDescription desc;
 		desc.parameter_names = {"blocks"};
@@ -3489,8 +3494,10 @@ void PandocBlockConvert::Register(ExtensionLoader &loader) {
 	}
 
 	{
-		CreateScalarFunctionInfo info(ScalarFunction("panduck_pandoc_ast_json", {DuckBlockTypes::DuckBlockListType()},
-		                                             LogicalType::VARCHAR, PandocAstJsonFun));
+		auto ast_json = ScalarFunction("panduck_pandoc_ast_json", {DuckBlockTypes::DuckBlockListType()},
+		                               LogicalType::VARCHAR, PandocAstJsonFun);
+		ast_json.SetFallible();
+		CreateScalarFunctionInfo info(std::move(ast_json));
 		info.on_conflict = OnCreateConflict::ALTER_ON_CONFLICT;
 		FunctionDescription desc;
 		desc.parameter_names = {"blocks"};

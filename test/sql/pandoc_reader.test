@@ -423,6 +423,17 @@ SELECT panduck_pandoc_ast_to_blocks(NULL) IS NULL;
 ----
 true
 
+# The scalar route reaches the same depth guard as the table function above, and it must
+# surface as the guard's own Invalid Input error. DuckDB v2.0.0 turns an execution error
+# from a function not marked SetFallible() into an INTERNAL error that still quotes the
+# original text, so the "Invalid Input Error: " prefix is what this asserts.
+statement error
+SELECT panduck_pandoc_ast_to_blocks(
+  '{"pandoc-api-version":[1,23,1],"meta":{},"blocks":[{"t":"Para","c":[' ||
+  repeat('{"t":"Emph","c":[', 200) || '{"t":"Str","c":"x"}' || repeat(']}', 200) || ']}]}');
+----
+Invalid Input Error: Pandoc AST conversion exceeded the maximum nesting depth
+
 # ---------------------------------------------------------------------------
 # ROUND TRIP LOSES NO TEXT, and the block COUNT deliberately is not asserted equal.
 #
