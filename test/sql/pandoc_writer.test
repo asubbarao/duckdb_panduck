@@ -292,6 +292,29 @@ FROM read_org_blocks_string('Body.');
 ----
 IO Error: Could not open file for writing
 
+# "All three" above was one short: panduck_blocks_to_pandoc_json and its alias
+# panduck_pandoc_ast_json call BuildBlocksJson too, and were not marked. A Div nested
+# 140 deep is past the 128 limit; level alone carries the nesting in duck_block.
+statement error
+SELECT panduck_blocks_to_pandoc_json(list(struct_pack(
+    kind := 'block', element_type := CASE WHEN i < 140 THEN 'div' ELSE 'paragraph' END,
+    content := CASE WHEN i < 140 THEN NULL ELSE 'x' END, level := i::INTEGER,
+    encoding := NULL::VARCHAR, attributes := MAP {}::MAP(VARCHAR, VARCHAR),
+    element_order := (i - 1)::INTEGER) ORDER BY i))
+FROM range(1, 141) t(i);
+----
+Invalid Input Error: Pandoc AST conversion exceeded the maximum nesting depth
+
+statement error
+SELECT panduck_pandoc_ast_json(list(struct_pack(
+    kind := 'block', element_type := CASE WHEN i < 140 THEN 'div' ELSE 'paragraph' END,
+    content := CASE WHEN i < 140 THEN NULL ELSE 'x' END, level := i::INTEGER,
+    encoding := NULL::VARCHAR, attributes := MAP {}::MAP(VARCHAR, VARCHAR),
+    element_order := (i - 1)::INTEGER) ORDER BY i))
+FROM range(1, 141) t(i);
+----
+Invalid Input Error: Pandoc AST conversion exceeded the maximum nesting depth
+
 # ---------------------------------------------------------------------------
 # CODE AND MATH INLINES SURVIVE THE PANDOC AST BRIDGE, IN BOTH DIRECTIONS.
 #

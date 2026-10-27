@@ -565,10 +565,18 @@ flag := true	n := 2	s := 'o''brien'
 # A requested intent with no mapping RAISES rather than being dropped. This is the
 # pages-was-a-lie lesson applied in advance: a parameter accepted and ignored reads as a
 # feature at the call site, which is exactly how `pages` survived unimplemented.
+#
+# THE "Invalid Input Error: " PREFIX IS THE ASSERTION, on this and every expectation below
+# that panduck_reader_option_for or panduck_render_params raises. DuckDB v2.0.0 replaces an
+# execution error from a function not marked SetFallible() with an INTERNAL error that
+# still quotes the original text, so the bare text matched the broken build too. This case
+# failed the community-extensions v2.0.0 build of 0.6.3 (duckdb/community-extensions#3404),
+# while panduck's own v2.0 leg passed it. See pandoc_writer.test for the same lesson, learned
+# first on panduck_write_pandoc_ast.
 statement error
 SELECT panduck_read_arms_opt(['a.odt'], false, 'attributes', 'all');
 ----
-has no mapping for
+Invalid Input Error: panduck: the reader for a.odt has no mapping for
 
 # ---------------------------------------------------------------------------
 # THE OPTION REACHES DISPATCH, not merely panduck_read_arms_opt's own test. An option the
@@ -599,7 +607,7 @@ SELECT count(*) FROM read_panduck_doc('test/fixtures/constructs.odt', attributes
 statement error
 SELECT count(*) FROM read_panduck_doc('test/fixtures/constructs.odt', attributes := 'all');
 ----
-has no mapping for
+Invalid Input Error: panduck: the reader for
 
 # EVERY SPECIAL-CASED BRANCH REFUSES TOO. pdf, zim, toml/yaml and the text and code
 # fallbacks build their own SQL rather than going through panduck_read_arms_opt, so
@@ -657,7 +665,7 @@ pages must be N or N-M, got <NULL>
 statement error
 SELECT panduck_read_arms_opt(['x.htmltest'], false, 'attributes', NULL);
 ----
-must name a value
+Invalid Input Error: panduck: attributes must name a value
 
 # ---------------------------------------------------------------------------
 # EVERY OPTION FIELD IS REQUIRED, AND AN OMITTED ONE ARRIVES AS NULL RATHER THAN AS A BIND
@@ -874,7 +882,7 @@ SELECT panduck_render_params(MAP{});
 statement error
 SELECT panduck_render_params(MAP{'x := 1) UNION SELECT': 'y'});
 ----
-must be an identifier
+Invalid Input Error: panduck: reader_params key must be an identifier
 
 # A NULL VALUE for a key is not one, the same ruling panduck_reader_option_for makes for an
 # option value: silently dropping the entry is the parameter accepted and ignored, and
@@ -883,7 +891,7 @@ must be an identifier
 statement error
 SELECT panduck_render_params(MAP{'ignore_errors': NULL});
 ----
-must name a value
+Invalid Input Error: panduck: reader_params['ignore_errors'] must name a value
 
 # THE OPTION REACHES DISPATCH, through the ONE builder both the plural and generic branches
 # of read_panduck_doc share -- panduck_read_arms_opt -- exactly the way `attributes` does.
